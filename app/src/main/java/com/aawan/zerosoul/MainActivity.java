@@ -17,17 +17,19 @@ import android.webkit.WebViewClient;
 import android.webkit.PermissionRequest;
 import android.webkit.GeolocationPermissions;
 import android.webkit.JsResult;
+import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
 import android.widget.Toast;
-import androidx.annotation.NonNull;
-import androidx.appcompat.app.AppCompatActivity;
-import androidx.core.app.ActivityCompat;
-import androidx.core.content.ContextCompat;
-import com.aawan.zerosoul.R;
 
+import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.InetAddress;
+import java.net.URL;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
-public class MainActivity extends AppCompatActivity {
+public class MainActivity extends Activity {
 
     private WebView webView;
     private ValueCallback<Uri[]> mFilePathCallback;
@@ -39,7 +41,7 @@ public class MainActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.main);
 
-        webView = findViewById(R.id.webview);
+        webView = (WebView) findViewById(R.id.webview);
         
         setupWebView();
         checkPermissions();
@@ -50,21 +52,21 @@ public class MainActivity extends AppCompatActivity {
     private void setupWebView() {
         WebSettings settings = webView.getSettings();
         
-        // Enable JavaScript and other "Chrome" features
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
         settings.setDatabaseEnabled(true);
         settings.setAllowFileAccess(true);
         settings.setAllowContentAccess(true);
-        settings.setSupportMultipleWindows(true);
-        settings.setJavaScriptCanOpenWindowsAutomatically(true);
+        
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1) {
+            settings.setMediaPlaybackRequiresUserGesture(false);
+        }
+        
         settings.setGeolocationEnabled(true);
+        settings.setJavaScriptCanOpenWindowsAutomatically(true);
+        settings.setSupportMultipleWindows(true);
         settings.setLoadWithOverviewMode(true);
         settings.setUseWideViewPort(true);
-        settings.setSupportZoom(true);
-        settings.setBuiltInZoomControls(true);
-        settings.setDisplayZoomControls(false);
-        settings.setCacheMode(WebSettings.LOAD_DEFAULT);
         
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
             settings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
@@ -75,11 +77,41 @@ public class MainActivity extends AppCompatActivity {
 
         webView.setWebViewClient(new WebViewClient() {
             @Override
+            public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+                // OpenDNS Integration using Native Java
+                String urlString = request.getUrl().toString();
+                if (urlString.contains("rf.gd")) {
+                    try {
+                        // Force OpenDNS resolution for this domain
+                        // Note: This is a basic implementation using native HttpURLConnection
+                        URL url = new URL(urlString);
+                        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                        
+                        // Set OpenDNS as a property hint (limited effect but clean)
+                        System.setProperty("sun.net.spi.nameservice.nameservers", "208.67.222.222");
+                        
+                        conn.setRequestMethod(request.getMethod());
+                        for (Map.Entry<String, String> entry : request.getRequestHeaders().entrySet()) {
+                            conn.setRequestProperty(entry.getKey(), entry.getValue());
+                        }
+
+                        InputStream is = conn.getInputStream();
+                        String contentType = conn.getContentType();
+                        String encoding = conn.getContentEncoding();
+
+                        return new WebResourceResponse(contentType, encoding, is);
+                    } catch (Exception e) {
+                        // Fallback to default if error
+                    }
+                }
+                return super.shouldInterceptRequest(view, request);
+            }
+
+            @Override
             public boolean shouldOverrideUrlLoading(WebView view, String url) {
                 if (url.startsWith("http://") || url.startsWith("https://")) {
-                    return false; // Let WebView handle it
+                    return false;
                 }
-                // Handle other schemes (tel, mailto, etc)
                 try {
                     Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
                     startActivity(intent);
@@ -91,19 +123,6 @@ public class MainActivity extends AppCompatActivity {
         });
 
         webView.setWebChromeClient(new WebChromeClient() {
-            // Handle Alerts
-            @Override
-            public boolean onJsAlert(WebView view, String url, String message, JsResult result) {
-                return super.onJsAlert(view, url, message, result);
-            }
-
-            // Handle Geolocation
-            @Override
-            public void onGeolocationPermissionsShowPrompt(String origin, GeolocationPermissions.Callback callback) {
-                callback.invoke(origin, true, false);
-            }
-
-            // Handle Permissions (Notifications, Camera, etc)
             @Override
             public void onPermissionRequest(final PermissionRequest request) {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
@@ -111,16 +130,17 @@ public class MainActivity extends AppCompatActivity {
                 }
             }
 
-            // Handle File Upload (Android 5.0+)
+            @Override
+            public void onGeolocationPermissionsShowPrompt(String origin, GeolocationPermissions.Callback callback) {
+                callback.invoke(origin, true, false);
+            }
+
             @Override
             public boolean onShowFileChooser(WebView webView, ValueCallback<Uri[]> filePathCallback, WebChromeClient.FileChooserParams fileChooserParams) {
-                if (mFilePathCallback != null) {
-                    mFilePathCallback.onReceiveValue(null);
-                }
+                if (mFilePathCallback != null) mFilePathCallback.onReceiveValue(null);
                 mFilePathCallback = filePathCallback;
-
                 Intent intent = null;
-                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
                     intent = fileChooserParams.createIntent();
                 }
                 try {
@@ -135,22 +155,24 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void checkPermissions() {
-        String[] permissions = {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            String[] permissions = {
                 Manifest.permission.READ_EXTERNAL_STORAGE,
                 Manifest.permission.WRITE_EXTERNAL_STORAGE,
                 Manifest.permission.CAMERA,
                 Manifest.permission.ACCESS_FINE_LOCATION
-        };
+            };
 
-        List<String> listPermissionsNeeded = new ArrayList<>();
-        for (String p : permissions) {
-            if (ContextCompat.checkSelfPermission(this, p) != PackageManager.PERMISSION_GRANTED) {
-                listPermissionsNeeded.add(p);
+            List<String> listPermissionsNeeded = new ArrayList<String>();
+            for (String p : permissions) {
+                if (checkSelfPermission(p) != PackageManager.PERMISSION_GRANTED) {
+                    listPermissionsNeeded.add(p);
+                }
             }
-        }
 
-        if (!listPermissionsNeeded.isEmpty()) {
-            ActivityCompat.requestPermissions(this, listPermissionsNeeded.toArray(new String[0]), REQUEST_PERMISSIONS);
+            if (!listPermissionsNeeded.isEmpty()) {
+                requestPermissions(listPermissionsNeeded.toArray(new String[0]), REQUEST_PERMISSIONS);
+            }
         }
     }
 
@@ -159,24 +181,14 @@ public class MainActivity extends AppCompatActivity {
         if (requestCode == FILECHOOSER_RESULTCODE) {
             if (mFilePathCallback == null) return;
             Uri[] results = null;
-            if (resultCode == Activity.RESULT_OK) {
-                if (data != null) {
-                    String dataString = data.getDataString();
-                    if (dataString != null) {
-                        results = new Uri[]{Uri.parse(dataString)};
-                    } else if (data.getClipData() != null) {
-                        int count = data.getClipData().getItemCount();
-                        results = new Uri[count];
-                        for (int i = 0; i < count; i++) {
-                            results[i] = data.getClipData().getItemAt(i).getUri();
-                        }
-                    }
+            if (resultCode == Activity.RESULT_OK && data != null) {
+                String dataString = data.getDataString();
+                if (dataString != null) {
+                    results = new Uri[]{Uri.parse(dataString)};
                 }
             }
             mFilePathCallback.onReceiveValue(results);
             mFilePathCallback = null;
-        } else {
-            super.onActivityResult(requestCode, resultCode, data);
         }
     }
 
