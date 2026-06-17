@@ -18,17 +18,13 @@ import android.webkit.GeolocationPermissions;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
 
+import java.io.BufferedInputStream;
 import java.io.InputStream;
-import java.net.InetAddress;
-import java.net.UnknownHostException;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
-
-import okhttp3.Dns;
-import okhttp3.OkHttpClient;
-import okhttp3.Request;
-import okhttp3.Response;
+import java.util.Map;
 
 public class MainActivity extends Activity {
 
@@ -36,7 +32,6 @@ public class MainActivity extends Activity {
     private ValueCallback<Uri[]> mFilePathCallback;
     private final static int FILECHOOSER_RESULTCODE = 1;
     private static final int REQUEST_PERMISSIONS = 2;
-    private OkHttpClient client;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -44,32 +39,10 @@ public class MainActivity extends Activity {
         setContentView(R.layout.main);
 
         webView = (WebView) findViewById(R.id.webview);
-        
-        setupOkHttp();
         setupWebView();
         checkPermissions();
         
         webView.loadUrl("https://aawan-cafe.rf.gd/");
-    }
-
-    private void setupOkHttp() {
-        // Proper OpenDNS Integration using OkHttp
-        client = new OkHttpClient.Builder()
-            .dns(new Dns() {
-                @Override
-                public List<InetAddress> lookup(String hostname) throws UnknownHostException {
-                    if (hostname.contains("rf.gd")) {
-                        try {
-                            // Resolve using OpenDNS IP
-                            return Arrays.asList(InetAddress.getAllByName("208.67.222.222"));
-                        } catch (Exception e) {
-                            return Dns.SYSTEM.lookup(hostname);
-                        }
-                    }
-                    return Dns.SYSTEM.lookup(hostname);
-                }
-            })
-            .build();
     }
 
     private void setupWebView() {
@@ -87,35 +60,51 @@ public class MainActivity extends Activity {
             settings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
             CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true);
         }
-        
         CookieManager.getInstance().setAcceptCookie(true);
 
         webView.setWebViewClient(new WebViewClient() {
             @Override
             public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
-                String url = request.getUrl().toString();
-                if (url.startsWith("http")) {
+                String urlString = request.getUrl().toString();
+                
+                // Pure Native "Desi" DNS Interception
+                if (urlString.startsWith("http")) {
                     try {
-                        Request.Builder builder = new Request.Builder().url(url);
-                        // Forward headers
-                        for (String key : request.getRequestHeaders().keySet()) {
-                            builder.addHeader(key, request.getRequestHeaders().get(key));
-                        }
-                        
-                        Response response = client.newCall(builder.build()).execute();
-                        
-                        String contentType = "";
-                        String encoding = "UTF-8";
-                        if (response.body().contentType() != null) {
-                            contentType = response.body().contentType().type() + "/" + response.body().contentType().subtype();
+                        // Set OpenDNS IPs as System Properties (Native Java Way)
+                        System.setProperty("sun.net.spi.nameservice.nameservers", "208.67.222.222");
+                        System.setProperty("sun.net.spi.nameservice.provider.1", "dns,sun");
+
+                        URL url = new URL(urlString);
+                        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                        conn.setConnectTimeout(10000);
+                        conn.setReadTimeout(10000);
+                        conn.setRequestMethod(request.getMethod());
+
+                        // Forward Headers Manually
+                        for (Map.Entry<String, String> entry : request.getRequestHeaders().entrySet()) {
+                            conn.setRequestProperty(entry.getKey(), entry.getValue());
                         }
 
-                        return new WebResourceResponse(contentType, encoding, response.body().byteStream());
+                        // Get Response
+                        InputStream in = new BufferedInputStream(conn.getInputStream());
+                        String contentType = conn.getContentType();
+                        String encoding = conn.getContentEncoding();
+
+                        // Parse MimeType and Encoding
+                        String mimeType = "text/html";
+                        if (contentType != null && contentType.contains(";")) {
+                            mimeType = contentType.split(";")[0].trim();
+                        } else if (contentType != null) {
+                            mimeType = contentType;
+                        }
+
+                        return new WebResourceResponse(mimeType, encoding, in);
                     } catch (Exception e) {
+                        // If native fetch fails, let WebView try normally
                         return null;
                     }
                 }
-                return null;
+                return super.shouldInterceptRequest(view, request);
             }
 
             @Override
@@ -169,7 +158,7 @@ public class MainActivity extends Activity {
                 Manifest.permission.CAMERA,
                 Manifest.permission.ACCESS_FINE_LOCATION
             };
-            List<String> needed = new ArrayList<String>();
+            List<String> needed = new ArrayList<>();
             for (String p : permissions) {
                 if (checkSelfPermission(p) != PackageManager.PERMISSION_GRANTED) needed.add(p);
             }
