@@ -7,7 +7,6 @@ import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
-import android.view.View;
 import android.webkit.CookieManager;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
@@ -16,18 +15,20 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.webkit.PermissionRequest;
 import android.webkit.GeolocationPermissions;
-import android.webkit.JsResult;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
-import android.widget.Toast;
 
 import java.io.InputStream;
-import java.net.HttpURLConnection;
 import java.net.InetAddress;
-import java.net.URL;
+import java.net.UnknownHostException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
-import java.util.Map;
+
+import okhttp3.Dns;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.Response;
 
 public class MainActivity extends Activity {
 
@@ -35,6 +36,7 @@ public class MainActivity extends Activity {
     private ValueCallback<Uri[]> mFilePathCallback;
     private final static int FILECHOOSER_RESULTCODE = 1;
     private static final int REQUEST_PERMISSIONS = 2;
+    private OkHttpClient client;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -43,30 +45,43 @@ public class MainActivity extends Activity {
 
         webView = (WebView) findViewById(R.id.webview);
         
+        setupOkHttp();
         setupWebView();
         checkPermissions();
         
         webView.loadUrl("https://aawan-cafe.rf.gd/");
     }
 
+    private void setupOkHttp() {
+        // Proper OpenDNS Integration using OkHttp
+        client = new OkHttpClient.Builder()
+            .dns(new Dns() {
+                @Override
+                public List<InetAddress> lookup(String hostname) throws UnknownHostException {
+                    if (hostname.contains("rf.gd")) {
+                        try {
+                            // Resolve using OpenDNS IP
+                            return Arrays.asList(InetAddress.getAllByName("208.67.222.222"));
+                        } catch (Exception e) {
+                            return Dns.SYSTEM.lookup(hostname);
+                        }
+                    }
+                    return Dns.SYSTEM.lookup(hostname);
+                }
+            })
+            .build();
+    }
+
     private void setupWebView() {
         WebSettings settings = webView.getSettings();
-        
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
         settings.setDatabaseEnabled(true);
         settings.setAllowFileAccess(true);
         settings.setAllowContentAccess(true);
-        
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1) {
-            settings.setMediaPlaybackRequiresUserGesture(false);
-        }
-        
         settings.setGeolocationEnabled(true);
         settings.setJavaScriptCanOpenWindowsAutomatically(true);
         settings.setSupportMultipleWindows(true);
-        settings.setLoadWithOverviewMode(true);
-        settings.setUseWideViewPort(true);
         
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
             settings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
@@ -78,43 +93,36 @@ public class MainActivity extends Activity {
         webView.setWebViewClient(new WebViewClient() {
             @Override
             public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
-                // OpenDNS Integration using Native Java
-                String urlString = request.getUrl().toString();
-                if (urlString.contains("rf.gd")) {
+                String url = request.getUrl().toString();
+                if (url.startsWith("http")) {
                     try {
-                        // Force OpenDNS resolution for this domain
-                        // Note: This is a basic implementation using native HttpURLConnection
-                        URL url = new URL(urlString);
-                        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                        Request.Builder builder = new Request.Builder().url(url);
+                        // Forward headers
+                        for (String key : request.getRequestHeaders().keySet()) {
+                            builder.addHeader(key, request.getRequestHeaders().get(key));
+                        }
                         
-                        // Set OpenDNS as a property hint (limited effect but clean)
-                        System.setProperty("sun.net.spi.nameservice.nameservers", "208.67.222.222");
+                        Response response = client.newCall(builder.build()).execute();
                         
-                        conn.setRequestMethod(request.getMethod());
-                        for (Map.Entry<String, String> entry : request.getRequestHeaders().entrySet()) {
-                            conn.setRequestProperty(entry.getKey(), entry.getValue());
+                        String contentType = "";
+                        String encoding = "UTF-8";
+                        if (response.body().contentType() != null) {
+                            contentType = response.body().contentType().type() + "/" + response.body().contentType().subtype();
                         }
 
-                        InputStream is = conn.getInputStream();
-                        String contentType = conn.getContentType();
-                        String encoding = conn.getContentEncoding();
-
-                        return new WebResourceResponse(contentType, encoding, is);
+                        return new WebResourceResponse(contentType, encoding, response.body().byteStream());
                     } catch (Exception e) {
-                        // Fallback to default if error
+                        return null;
                     }
                 }
-                return super.shouldInterceptRequest(view, request);
+                return null;
             }
 
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, String url) {
-                if (url.startsWith("http://") || url.startsWith("https://")) {
-                    return false;
-                }
+                if (url.startsWith("http")) return false;
                 try {
-                    Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
-                    startActivity(intent);
+                    startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
                     return true;
                 } catch (Exception e) {
                     return false;
@@ -124,7 +132,7 @@ public class MainActivity extends Activity {
 
         webView.setWebChromeClient(new WebChromeClient() {
             @Override
-            public void onPermissionRequest(final PermissionRequest request) {
+            public void onPermissionRequest(PermissionRequest request) {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
                     request.grant(request.getResources());
                 }
@@ -136,8 +144,7 @@ public class MainActivity extends Activity {
             }
 
             @Override
-            public boolean onShowFileChooser(WebView webView, ValueCallback<Uri[]> filePathCallback, WebChromeClient.FileChooserParams fileChooserParams) {
-                if (mFilePathCallback != null) mFilePathCallback.onReceiveValue(null);
+            public boolean onShowFileChooser(WebView webView, ValueCallback<Uri[]> filePathCallback, FileChooserParams fileChooserParams) {
                 mFilePathCallback = filePathCallback;
                 Intent intent = null;
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
@@ -162,42 +169,29 @@ public class MainActivity extends Activity {
                 Manifest.permission.CAMERA,
                 Manifest.permission.ACCESS_FINE_LOCATION
             };
-
-            List<String> listPermissionsNeeded = new ArrayList<String>();
+            List<String> needed = new ArrayList<String>();
             for (String p : permissions) {
-                if (checkSelfPermission(p) != PackageManager.PERMISSION_GRANTED) {
-                    listPermissionsNeeded.add(p);
-                }
+                if (checkSelfPermission(p) != PackageManager.PERMISSION_GRANTED) needed.add(p);
             }
-
-            if (!listPermissionsNeeded.isEmpty()) {
-                requestPermissions(listPermissionsNeeded.toArray(new String[0]), REQUEST_PERMISSIONS);
-            }
+            if (!needed.isEmpty()) requestPermissions(needed.toArray(new String[0]), REQUEST_PERMISSIONS);
         }
     }
 
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
-        if (requestCode == FILECHOOSER_RESULTCODE) {
-            if (mFilePathCallback == null) return;
-            Uri[] results = null;
-            if (resultCode == Activity.RESULT_OK && data != null) {
-                String dataString = data.getDataString();
-                if (dataString != null) {
-                    results = new Uri[]{Uri.parse(dataString)};
-                }
+        if (requestCode == FILECHOOSER_RESULTCODE && mFilePathCallback != null) {
+            Uri[] res = null;
+            if (resultCode == RESULT_OK && data != null) {
+                if (data.getDataString() != null) res = new Uri[]{Uri.parse(data.getDataString())};
             }
-            mFilePathCallback.onReceiveValue(results);
+            mFilePathCallback.onReceiveValue(res);
             mFilePathCallback = null;
         }
     }
 
     @Override
     public void onBackPressed() {
-        if (webView.canGoBack()) {
-            webView.goBack();
-        } else {
-            super.onBackPressed();
-        }
+        if (webView.canGoBack()) webView.goBack();
+        else super.onBackPressed();
     }
 }
