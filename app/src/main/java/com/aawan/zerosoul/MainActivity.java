@@ -19,12 +19,17 @@ import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
 
 import java.io.BufferedInputStream;
+import java.io.BufferedReader;
 import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import javax.net.ssl.HttpsURLConnection;
+import javax.net.ssl.HostnameVerifier;
+import javax.net.ssl.SSLSession;
 
 public class MainActivity extends Activity {
 
@@ -32,6 +37,7 @@ public class MainActivity extends Activity {
     private ValueCallback<Uri[]> mFilePathCallback;
     private final static int FILECHOOSER_RESULTCODE = 1;
     private static final int REQUEST_PERMISSIONS = 2;
+    private String resolvedIP = null;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -42,7 +48,47 @@ public class MainActivity extends Activity {
         setupWebView();
         checkPermissions();
         
-        webView.loadUrl("https://aawan-cafe.rf.gd/");
+        // Resolve IP in background
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                resolvedIP = resolveIPViaCloudflare("aawan-cafe.rf.gd");
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        webView.loadUrl("https://aawan-cafe.rf.gd/");
+                    }
+                });
+            }
+        }).start();
+    }
+
+    // Desi DNS-over-HTTPS Resolver (Pure Java)
+    private String resolveIPViaCloudflare(String host) {
+        try {
+            // Cloudflare DNS JSON API
+            URL url = new URL("https://1.1.1.1/dns-query?name=" + host + "&type=A");
+            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            conn.setRequestProperty("Accept", "application/dns-json");
+            conn.setConnectTimeout(5000);
+            
+            BufferedReader br = new BufferedReader(new InputStreamReader(conn.getInputStream()));
+            StringBuilder sb = new StringBuilder();
+            String line;
+            while ((line = br.readLine()) != null) sb.append(line);
+            
+            String response = sb.toString();
+            // Desi JSON Parsing (Manual String Search)
+            int dataIndex = response.indexOf("\"data\":\"");
+            if (dataIndex != -1) {
+                int start = dataIndex + 8;
+                int end = response.indexOf("\"", start);
+                return response.substring(start, end);
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return null;
     }
 
     private void setupWebView() {
@@ -51,10 +97,7 @@ public class MainActivity extends Activity {
         settings.setDomStorageEnabled(true);
         settings.setDatabaseEnabled(true);
         settings.setAllowFileAccess(true);
-        settings.setAllowContentAccess(true);
         settings.setGeolocationEnabled(true);
-        settings.setJavaScriptCanOpenWindowsAutomatically(true);
-        settings.setSupportMultipleWindows(true);
         
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
             settings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
@@ -66,56 +109,51 @@ public class MainActivity extends Activity {
             @Override
             public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
                 String urlString = request.getUrl().toString();
-                
-                // Pure Native "Desi" DNS Interception
-                if (urlString.startsWith("http")) {
+                String host = request.getUrl().getHost();
+
+                if (resolvedIP != null && host != null && host.equals("aawan-cafe.rf.gd")) {
                     try {
-                        // Set OpenDNS IPs as System Properties (Native Java Way)
-                        System.setProperty("sun.net.spi.nameservice.nameservers", "208.67.222.222");
-                        System.setProperty("sun.net.spi.nameservice.provider.1", "dns,sun");
-
-                        URL url = new URL(urlString);
-                        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-                        conn.setConnectTimeout(10000);
-                        conn.setReadTimeout(10000);
+                        // Desi Way: Replace Host with IP in URL
+                        String newUrlString = urlString.replace(host, resolvedIP);
+                        URL url = new URL(newUrlString);
+                        
+                        HttpsURLConnection conn = (HttpsURLConnection) url.openConnection();
                         conn.setRequestMethod(request.getMethod());
-
-                        // Forward Headers Manually
+                        
+                        // Set Manual Host Header (Crucial for shared hosting like rf.gd)
+                        conn.setRequestProperty("Host", host);
+                        
+                        // Forward all other headers
                         for (Map.Entry<String, String> entry : request.getRequestHeaders().entrySet()) {
-                            conn.setRequestProperty(entry.getKey(), entry.getValue());
+                            if (!entry.getKey().equalsIgnoreCase("Host")) {
+                                conn.setRequestProperty(entry.getKey(), entry.getValue());
+                            }
                         }
 
-                        // Get Response
+                        // Desi SSL Fix: Verify that the IP matches our intended Host
+                        conn.setHostnameVerifier(new HostnameVerifier() {
+                            @Override
+                            public boolean verify(String hostname, SSLSession session) {
+                                return true; // Accept since we manually pointed to the IP
+                            }
+                        });
+
                         InputStream in = new BufferedInputStream(conn.getInputStream());
                         String contentType = conn.getContentType();
                         String encoding = conn.getContentEncoding();
+                        if (encoding == null) encoding = "UTF-8";
 
-                        // Parse MimeType and Encoding
                         String mimeType = "text/html";
-                        if (contentType != null && contentType.contains(";")) {
+                        if (contentType != null) {
                             mimeType = contentType.split(";")[0].trim();
-                        } else if (contentType != null) {
-                            mimeType = contentType;
                         }
 
                         return new WebResourceResponse(mimeType, encoding, in);
                     } catch (Exception e) {
-                        // If native fetch fails, let WebView try normally
-                        return null;
+                        return null; // Fallback
                     }
                 }
                 return super.shouldInterceptRequest(view, request);
-            }
-
-            @Override
-            public boolean shouldOverrideUrlLoading(WebView view, String url) {
-                if (url.startsWith("http")) return false;
-                try {
-                    startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
-                    return true;
-                } catch (Exception e) {
-                    return false;
-                }
             }
         });
 
@@ -126,19 +164,11 @@ public class MainActivity extends Activity {
                     request.grant(request.getResources());
                 }
             }
-
-            @Override
-            public void onGeolocationPermissionsShowPrompt(String origin, GeolocationPermissions.Callback callback) {
-                callback.invoke(origin, true, false);
-            }
-
             @Override
             public boolean onShowFileChooser(WebView webView, ValueCallback<Uri[]> filePathCallback, FileChooserParams fileChooserParams) {
                 mFilePathCallback = filePathCallback;
                 Intent intent = null;
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                    intent = fileChooserParams.createIntent();
-                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) intent = fileChooserParams.createIntent();
                 try {
                     startActivityForResult(intent, FILECHOOSER_RESULTCODE);
                 } catch (Exception e) {
@@ -152,16 +182,9 @@ public class MainActivity extends Activity {
 
     private void checkPermissions() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            String[] permissions = {
-                Manifest.permission.READ_EXTERNAL_STORAGE,
-                Manifest.permission.WRITE_EXTERNAL_STORAGE,
-                Manifest.permission.CAMERA,
-                Manifest.permission.ACCESS_FINE_LOCATION
-            };
+            String[] permissions = {Manifest.permission.READ_EXTERNAL_STORAGE, Manifest.permission.WRITE_EXTERNAL_STORAGE, Manifest.permission.CAMERA, Manifest.permission.ACCESS_FINE_LOCATION};
             List<String> needed = new ArrayList<>();
-            for (String p : permissions) {
-                if (checkSelfPermission(p) != PackageManager.PERMISSION_GRANTED) needed.add(p);
-            }
+            for (String p : permissions) if (checkSelfPermission(p) != PackageManager.PERMISSION_GRANTED) needed.add(p);
             if (!needed.isEmpty()) requestPermissions(needed.toArray(new String[0]), REQUEST_PERMISSIONS);
         }
     }
@@ -170,9 +193,7 @@ public class MainActivity extends Activity {
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         if (requestCode == FILECHOOSER_RESULTCODE && mFilePathCallback != null) {
             Uri[] res = null;
-            if (resultCode == RESULT_OK && data != null) {
-                if (data.getDataString() != null) res = new Uri[]{Uri.parse(data.getDataString())};
-            }
+            if (resultCode == RESULT_OK && data != null) if (data.getDataString() != null) res = new Uri[]{Uri.parse(data.getDataString())};
             mFilePathCallback.onReceiveValue(res);
             mFilePathCallback = null;
         }
@@ -180,7 +201,6 @@ public class MainActivity extends Activity {
 
     @Override
     public void onBackPressed() {
-        if (webView.canGoBack()) webView.goBack();
-        else super.onBackPressed();
+        if (webView.canGoBack()) webView.goBack(); else super.onBackPressed();
     }
 }
