@@ -17,6 +17,7 @@ import android.webkit.PermissionRequest;
 import android.webkit.GeolocationPermissions;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
+import android.widget.Toast;
 
 import java.io.BufferedInputStream;
 import java.io.BufferedReader;
@@ -38,6 +39,7 @@ public class MainActivity extends Activity {
     private final static int FILECHOOSER_RESULTCODE = 1;
     private static final int REQUEST_PERMISSIONS = 2;
     private String resolvedIP = null;
+    private String userAgent = "";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -45,17 +47,36 @@ public class MainActivity extends Activity {
         setContentView(R.layout.main);
 
         webView = (WebView) findViewById(R.id.webview);
+        userAgent = webView.getSettings().getUserAgentString();
+        
         setupWebView();
         checkPermissions();
         
-        // Resolve IP in background
+        startDnsBypass();
+    }
+
+    private void startDnsBypass() {
         new Thread(new Runnable() {
             @Override
             public void run() {
+                // Try Cloudflare DoH (JSON)
                 resolvedIP = resolveIPViaCloudflare("aawan-cafe.rf.gd");
+                
+                // Fallback to direct resolution if DoH fails
+                if (resolvedIP == null) {
+                    try {
+                        resolvedIP = java.net.InetAddress.getByName("aawan-cafe.rf.gd").getHostAddress();
+                    } catch (Exception e) {}
+                }
+
                 runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
+                        if (resolvedIP != null) {
+                            Toast.makeText(MainActivity.this, "DNS Resolved: " + resolvedIP, Toast.LENGTH_SHORT).show();
+                        } else {
+                            Toast.makeText(MainActivity.this, "DNS Failed, using normal load", Toast.LENGTH_SHORT).show();
+                        }
                         webView.loadUrl("https://aawan-cafe.rf.gd/");
                     }
                 });
@@ -63,10 +84,8 @@ public class MainActivity extends Activity {
         }).start();
     }
 
-    // Desi DNS-over-HTTPS Resolver (Pure Java)
     private String resolveIPViaCloudflare(String host) {
         try {
-            // Cloudflare DNS JSON API
             URL url = new URL("https://1.1.1.1/dns-query?name=" + host + "&type=A");
             HttpURLConnection conn = (HttpURLConnection) url.openConnection();
             conn.setRequestProperty("Accept", "application/dns-json");
@@ -76,18 +95,15 @@ public class MainActivity extends Activity {
             StringBuilder sb = new StringBuilder();
             String line;
             while ((line = br.readLine()) != null) sb.append(line);
-            
             String response = sb.toString();
-            // Desi JSON Parsing (Manual String Search)
+            
             int dataIndex = response.indexOf("\"data\":\"");
             if (dataIndex != -1) {
                 int start = dataIndex + 8;
                 int end = response.indexOf("\"", start);
                 return response.substring(start, end);
             }
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
+        } catch (Exception e) {}
         return null;
     }
 
@@ -98,6 +114,7 @@ public class MainActivity extends Activity {
         settings.setDatabaseEnabled(true);
         settings.setAllowFileAccess(true);
         settings.setGeolocationEnabled(true);
+        settings.setCacheMode(WebSettings.LOAD_DEFAULT);
         
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
             settings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
@@ -111,30 +128,35 @@ public class MainActivity extends Activity {
                 String urlString = request.getUrl().toString();
                 String host = request.getUrl().getHost();
 
+                // Intercept main requests for our domain
                 if (resolvedIP != null && host != null && host.equals("aawan-cafe.rf.gd")) {
                     try {
-                        // Desi Way: Replace Host with IP in URL
                         String newUrlString = urlString.replace(host, resolvedIP);
                         URL url = new URL(newUrlString);
                         
                         HttpsURLConnection conn = (HttpsURLConnection) url.openConnection();
                         conn.setRequestMethod(request.getMethod());
-                        
-                        // Set Manual Host Header (Crucial for shared hosting like rf.gd)
                         conn.setRequestProperty("Host", host);
+                        conn.setRequestProperty("User-Agent", userAgent);
                         
-                        // Forward all other headers
+                        // Sync Cookies
+                        String cookies = CookieManager.getInstance().getCookie(urlString);
+                        if (cookies != null) {
+                            conn.setRequestProperty("Cookie", cookies);
+                        }
+
+                        // Forward headers
                         for (Map.Entry<String, String> entry : request.getRequestHeaders().entrySet()) {
-                            if (!entry.getKey().equalsIgnoreCase("Host")) {
+                            if (!entry.getKey().equalsIgnoreCase("Host") && !entry.getKey().equalsIgnoreCase("User-Agent")) {
                                 conn.setRequestProperty(entry.getKey(), entry.getValue());
                             }
                         }
 
-                        // Desi SSL Fix: Verify that the IP matches our intended Host
+                        // SSL Bypass
                         conn.setHostnameVerifier(new HostnameVerifier() {
                             @Override
                             public boolean verify(String hostname, SSLSession session) {
-                                return true; // Accept since we manually pointed to the IP
+                                return true;
                             }
                         });
 
@@ -142,15 +164,11 @@ public class MainActivity extends Activity {
                         String contentType = conn.getContentType();
                         String encoding = conn.getContentEncoding();
                         if (encoding == null) encoding = "UTF-8";
-
-                        String mimeType = "text/html";
-                        if (contentType != null) {
-                            mimeType = contentType.split(";")[0].trim();
-                        }
+                        String mimeType = (contentType != null) ? contentType.split(";")[0].trim() : "text/html";
 
                         return new WebResourceResponse(mimeType, encoding, in);
                     } catch (Exception e) {
-                        return null; // Fallback
+                        return null;
                     }
                 }
                 return super.shouldInterceptRequest(view, request);
@@ -160,9 +178,7 @@ public class MainActivity extends Activity {
         webView.setWebChromeClient(new WebChromeClient() {
             @Override
             public void onPermissionRequest(PermissionRequest request) {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                    request.grant(request.getResources());
-                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) request.grant(request.getResources());
             }
             @Override
             public boolean onShowFileChooser(WebView webView, ValueCallback<Uri[]> filePathCallback, FileChooserParams fileChooserParams) {
