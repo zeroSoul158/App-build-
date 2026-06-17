@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <base-config>
+        <dns-over-https url="https://doh.opendns.com/dns-query" />
+    </base-config>
+</network-security-config>
+
